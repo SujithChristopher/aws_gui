@@ -1,6 +1,6 @@
 AWS S3 Bucket Browser
 
-A simple web-based tool to browse, view, and delete files from your AWS S3 buckets.
+A simple python PySide6 tool to browse, view, and delete files from your AWS S3 buckets.
 ✨ Features
 
     📂 List all objects in a specified S3 bucket
