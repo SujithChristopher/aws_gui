@@ -57,8 +57,8 @@ class S3Worker(QObject):
                 aws_secret_access_key=secret_key,
                 region_name=region
             )
-            # Test connection
-            self.s3_client.list_buckets()
+            # Test connection with a simple call that doesn't require ListAllMyBuckets
+            # We'll test when actually accessing a bucket
             return True
         except Exception as e:
             self.error_occurred.emit(f"Failed to connect to AWS: {str(e)}")
@@ -73,7 +73,9 @@ class S3Worker(QObject):
             response = self.s3_client.list_buckets()
             return [bucket['Name'] for bucket in response['Buckets']]
         except Exception as e:
-            self.error_occurred.emit(f"Failed to list buckets: {str(e)}")
+            # If listing buckets fails (no permission), return empty list
+            # User can manually enter bucket name
+            logger.warning(f"Cannot list buckets: {str(e)}")
             return []
     
     def list_objects(self, bucket_name: str, prefix: str = ""):
@@ -189,13 +191,20 @@ class CredentialsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("AWS Credentials")
         self.setModal(True)
-        self.setFixedSize(450, 250)
+        self.setFixedSize(450, 300)
         
         layout = QVBoxLayout()
         
         # Instructions
         info = QLabel("Enter your AWS credentials to connect to S3:")
         layout.addWidget(info)
+        
+        # Note about bucket access
+        note = QLabel("Note: If you don't have ListAllMyBuckets permission, "
+                     "you can manually enter the bucket name 'homerclouds'.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
+        layout.addWidget(note)
         
         # Credentials form
         form_layout = QFormLayout()
@@ -262,6 +271,9 @@ class S3BrowserMainWindow(QMainWindow):
         # Current state
         self.current_bucket = None
         self.current_objects = []
+        self.tree_view_mode = True
+        self.sort_ascending = True
+        self.current_sort = "Name"
         
         self.setup_ui()
         self.show_credentials_dialog()
@@ -279,8 +291,15 @@ class S3BrowserMainWindow(QMainWindow):
         # Bucket selection
         controls_layout.addWidget(QLabel("Bucket:"))
         self.bucket_combo = QComboBox()
+        self.bucket_combo.setEditable(True)  # Allow manual entry
         self.bucket_combo.currentTextChanged.connect(self.on_bucket_changed)
+        self.bucket_combo.lineEdit().returnPressed.connect(self.on_bucket_entered)
         controls_layout.addWidget(self.bucket_combo)
+        
+        # Load bucket button
+        self.load_bucket_btn = QPushButton("Load Bucket")
+        self.load_bucket_btn.clicked.connect(self.load_current_bucket)
+        controls_layout.addWidget(self.load_bucket_btn)
         
         # Refresh button
         self.refresh_btn = QPushButton("Refresh")
@@ -307,11 +326,39 @@ class S3BrowserMainWindow(QMainWindow):
         # Left panel - Object tree
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(QLabel("Objects:"))
+        
+        # Tree controls
+        tree_controls = QHBoxLayout()
+        tree_controls.addWidget(QLabel("Objects:"))
+        
+        # View mode toggle
+        self.view_mode_btn = QPushButton("Tree View")
+        self.view_mode_btn.setCheckable(True)
+        self.view_mode_btn.setChecked(True)
+        self.view_mode_btn.clicked.connect(self.toggle_view_mode)
+        tree_controls.addWidget(self.view_mode_btn)
+        
+        # Sort options
+        tree_controls.addWidget(QLabel("Sort:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["Name", "Size", "Date Modified"])
+        self.sort_combo.currentTextChanged.connect(self.sort_objects)
+        tree_controls.addWidget(self.sort_combo)
+        
+        # Sort order
+        self.sort_order_btn = QPushButton("↑")  # Ascending
+        self.sort_order_btn.setMaximumWidth(30)
+        self.sort_order_btn.setCheckable(True)
+        self.sort_order_btn.clicked.connect(self.toggle_sort_order)
+        tree_controls.addWidget(self.sort_order_btn)
+        
+        tree_controls.addStretch()
+        left_layout.addLayout(tree_controls)
         
         self.object_tree = QTreeWidget()
         self.object_tree.setHeaderLabels(["Name", "Size", "Modified", "ETag"])
         self.object_tree.itemClicked.connect(self.on_object_selected)
+        self.object_tree.setSortingEnabled(False)  # We'll handle sorting manually
         left_layout.addWidget(self.object_tree)
         
         # Delete button
@@ -403,13 +450,30 @@ class S3BrowserMainWindow(QMainWindow):
         """Load available buckets"""
         buckets = self.s3_worker.list_buckets()
         self.bucket_combo.clear()
-        self.bucket_combo.addItems(buckets)
+        
+        if buckets:
+            self.bucket_combo.addItems(buckets)
+        else:
+            # If no buckets listed (no permission), add default bucket name
+            self.bucket_combo.addItem("homerclouds")
+            self.status_bar.showMessage("Cannot list buckets - enter bucket name manually or use default")
+    
+    def on_bucket_entered(self):
+        """Handle manual bucket entry via Enter key"""
+        self.load_current_bucket()
+    
+    def load_current_bucket(self):
+        """Load the currently selected/entered bucket"""
+        bucket_name = self.bucket_combo.currentText().strip()
+        if bucket_name:
+            self.current_bucket = bucket_name
+            self.refresh_current_bucket()
     
     def on_bucket_changed(self, bucket_name: str):
         """Handle bucket selection change"""
-        if bucket_name and bucket_name != self.current_bucket:
-            self.current_bucket = bucket_name
-            self.refresh_current_bucket()
+        # Don't automatically load on text change since combo is editable
+        # User needs to press Enter or click Load Bucket button
+        pass
     
     def refresh_current_bucket(self):
         """Refresh current bucket contents"""
@@ -423,14 +487,10 @@ class S3BrowserMainWindow(QMainWindow):
         self.object_tree.clear()
         self.current_objects = objects
         
-        for obj in objects:
-            item = QTreeWidgetItem()
-            item.setText(0, obj['Key'])
-            item.setText(1, self.format_size(obj['Size']))
-            item.setText(2, obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S'))
-            item.setText(3, obj['ETag'][:16] + '...' if len(obj['ETag']) > 16 else obj['ETag'])
-            item.setData(0, Qt.UserRole, obj)
-            self.object_tree.addTopLevelItem(item)
+        if self.tree_view_mode:
+            self.populate_tree_view(objects)
+        else:
+            self.populate_flat_view(objects)
         
         self.object_tree.resizeColumnToContents(0)
         self.progress_bar.setVisible(False)
@@ -440,12 +500,127 @@ class S3BrowserMainWindow(QMainWindow):
         self.delete_btn.setEnabled(False)
         self.clear_preview()
     
+    def populate_tree_view(self, objects: List[Dict[str, Any]]):
+        """Populate tree view with folder structure"""
+        # Sort objects first
+        sorted_objects = self.sort_objects_list(objects)
+        
+        # Create folder structure
+        folder_items = {}
+        
+        for obj in sorted_objects:
+            key = obj['Key']
+            parts = key.split('/')
+            
+            current_parent = self.object_tree.invisibleRootItem()
+            current_path = ""
+            
+            # Create folder hierarchy
+            for i, part in enumerate(parts[:-1]):  # All parts except the last (filename)
+                current_path = current_path + part + "/" if current_path else part + "/"
+                
+                if current_path not in folder_items:
+                    folder_item = QTreeWidgetItem()
+                    folder_item.setText(0, part + "/")
+                    folder_item.setText(1, "")  # Folders don't have size
+                    folder_item.setText(2, "")  # Folders don't have modification date
+                    folder_item.setText(3, "")  # Folders don't have ETag
+                    folder_item.setData(0, Qt.UserRole, {"type": "folder", "path": current_path})
+                    
+                    # Style folders differently
+                    font = folder_item.font(0)
+                    font.setBold(True)
+                    folder_item.setFont(0, font)
+                    
+                    current_parent.addChild(folder_item)
+                    folder_items[current_path] = folder_item
+                
+                current_parent = folder_items[current_path]
+            
+            # Add the file to its parent folder (or root if no folders)
+            filename = parts[-1]
+            if filename:  # Don't add empty filenames (folder markers)
+                file_item = QTreeWidgetItem()
+                file_item.setText(0, filename)
+                file_item.setText(1, self.format_size(obj['Size']))
+                file_item.setText(2, obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S'))
+                file_item.setText(3, obj['ETag'][:16] + '...' if len(obj['ETag']) > 16 else obj['ETag'])
+                file_item.setData(0, Qt.UserRole, obj)
+                current_parent.addChild(file_item)
+        
+        # Expand first level folders
+        for i in range(self.object_tree.topLevelItemCount()):
+            item = self.object_tree.topLevelItem(i)
+            if item.data(0, Qt.UserRole) and item.data(0, Qt.UserRole).get("type") == "folder":
+                self.object_tree.expandItem(item)
+    
+    def populate_flat_view(self, objects: List[Dict[str, Any]]):
+        """Populate flat view (list all objects)"""
+        sorted_objects = self.sort_objects_list(objects)
+        
+        for obj in sorted_objects:
+            item = QTreeWidgetItem()
+            item.setText(0, obj['Key'])
+            item.setText(1, self.format_size(obj['Size']))
+            item.setText(2, obj['LastModified'].strftime('%Y-%m-%d %H:%M:%S'))
+            item.setText(3, obj['ETag'][:16] + '...' if len(obj['ETag']) > 16 else obj['ETag'])
+            item.setData(0, Qt.UserRole, obj)
+            self.object_tree.addTopLevelItem(item)
+    
+    def sort_objects_list(self, objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sort objects based on current sort settings"""
+        if self.current_sort == "Name":
+            key_func = lambda x: x['Key'].lower()
+        elif self.current_sort == "Size":
+            key_func = lambda x: x['Size']
+        elif self.current_sort == "Date Modified":
+            key_func = lambda x: x['LastModified']
+        else:
+            key_func = lambda x: x['Key'].lower()
+        
+        return sorted(objects, key=key_func, reverse=not self.sort_ascending)
+    
+    def toggle_view_mode(self):
+        """Toggle between tree and flat view"""
+        self.tree_view_mode = self.view_mode_btn.isChecked()
+        self.view_mode_btn.setText("Tree View" if self.tree_view_mode else "Flat View")
+        
+        if self.current_objects:
+            self.populate_object_tree(self.current_objects)
+    
+    def sort_objects(self, sort_type: str):
+        """Handle sort type change"""
+        self.current_sort = sort_type
+        if self.current_objects:
+            self.populate_object_tree(self.current_objects)
+    
+    def toggle_sort_order(self):
+        """Toggle sort order between ascending and descending"""
+        self.sort_ascending = not self.sort_ascending
+        self.sort_order_btn.setText("↑" if self.sort_ascending else "↓")
+        
+        if self.current_objects:
+            self.populate_object_tree(self.current_objects)
+    
     def on_object_selected(self, item: QTreeWidgetItem):
         """Handle object selection"""
         obj_data = item.data(0, Qt.UserRole)
         if obj_data:
-            self.delete_btn.setEnabled(True)
-            self.load_object_preview(obj_data)
+            # Check if it's a folder or file
+            if isinstance(obj_data, dict) and obj_data.get("type") == "folder":
+                # It's a folder, don't enable delete or load preview
+                self.delete_btn.setEnabled(False)
+                self.clear_preview()
+                
+                # Show folder info
+                folder_path = obj_data.get("path", "")
+                info = f"Folder: {folder_path}\n"
+                info += f"Type: Directory"
+                self.object_info.setText(info)
+            else:
+                # It's a file
+                self.delete_btn.setEnabled(True)
+                self.load_object_preview(obj_data)
     
     def load_object_preview(self, obj_data: Dict[str, Any]):
         """Load preview for selected object"""
@@ -513,6 +688,12 @@ class S3BrowserMainWindow(QMainWindow):
         
         obj_data = current_item.data(0, Qt.UserRole)
         if not obj_data:
+            return
+        
+        # Check if it's a folder
+        if isinstance(obj_data, dict) and obj_data.get("type") == "folder":
+            QMessageBox.warning(self, "Cannot Delete Folder", 
+                              "Cannot delete folders. Please delete individual files within the folder.")
             return
         
         # Show authentication dialog
