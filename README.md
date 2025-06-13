@@ -68,7 +68,6 @@ aws_gui/
 
 ## Security Notes
 
-- The default admin password is `admin123`. Change this in production.
 - AWS credentials are stored in memory and in a local file (`~/.aws_credentials.json`), which is ignored by git.
 - File deletion requires authentication.
 - **.gitignore** ensures that credentials and temp files are never committed.
