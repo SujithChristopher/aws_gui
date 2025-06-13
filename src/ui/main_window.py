@@ -494,7 +494,7 @@ class S3BrowserMainWindow(QMainWindow):
         self.status_bar.clearMessage()
     
     def display_csv_preview(self, content: bytes):
-        """Display CSV content in table format"""
+        """Display CSV content in table format, fallback to text if parsing fails."""
         try:
             # Read CSV content
             csv_content = content.decode('utf-8', errors='replace')
@@ -506,13 +506,8 @@ class S3BrowserMainWindow(QMainWindow):
                 self.csv_preview.setToolTip('CSV file is empty.')
                 return
             df = pd.read_csv(io.StringIO(csv_content))
-            if df.empty:
-                self.csv_preview.setRowCount(0)
-                self.csv_preview.setColumnCount(0)
-                self.csv_preview.setHorizontalHeaderLabels([])
-                self.csv_preview.setVerticalHeaderLabels([])
-                self.csv_preview.setToolTip('CSV file is empty.')
-                return
+            if df.empty or len(df.columns) == 0:
+                raise ValueError('No table detected')
             # Set up table
             self.csv_preview.setRowCount(len(df))
             self.csv_preview.setColumnCount(len(df.columns))
@@ -528,13 +523,15 @@ class S3BrowserMainWindow(QMainWindow):
             self.csv_preview.resizeColumnsToContents()
             self.csv_preview.setToolTip('')
         except Exception as e:
+            # Fallback: show as text
             self.csv_preview.setRowCount(0)
             self.csv_preview.setColumnCount(0)
             self.csv_preview.setHorizontalHeaderLabels([])
             self.csv_preview.setVerticalHeaderLabels([])
-            self.csv_preview.setToolTip(f'Failed to parse CSV: {str(e)}')
-            self.preview_tabs.setCurrentIndex(1)  # Always show CSV tab on error
-            self.show_error(f"Failed to parse CSV: {str(e)}")
+            self.csv_preview.setToolTip(f'Failed to parse CSV as table. Showing as text. Reason: {str(e)}')
+            self.text_preview.setText(content.decode('utf-8', errors='replace'))
+            self.preview_tabs.setCurrentIndex(0)  # Switch to Text tab
+            self.status_bar.showMessage('CSV could not be parsed as a table. Showing as text.')
     
     def clear_preview(self):
         """Clear all preview content"""
