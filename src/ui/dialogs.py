@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFormLayout, QGroupBox, QComboBox
 )
 from PySide6.QtCore import Qt
+import os
+import json
 
 class AuthenticationDialog(QDialog):
     """Dialog for delete authentication"""
@@ -51,6 +53,8 @@ class AuthenticationDialog(QDialog):
     def get_password(self) -> str:
         return self.password_input.text()
 
+
+CREDENTIALS_PATH = os.path.join(os.path.expanduser('~'), '.aws_credentials.json')
 
 class CredentialsDialog(QDialog):
     """Dialog for AWS credentials input"""
@@ -103,10 +107,44 @@ class CredentialsDialog(QDialog):
         layout.addWidget(button_box)
         
         self.setLayout(layout)
+        
+        # Load credentials if available
+        self.load_credentials()
     
     def get_credentials(self) -> tuple:
         return (
             self.access_key_input.text(),
             self.secret_key_input.text(),
             self.region_combo.currentText()
-        ) 
+        )
+
+    def accept(self):
+        # Save credentials on accept
+        self.save_credentials()
+        super().accept()
+
+    def save_credentials(self):
+        creds = {
+            'access_key': self.access_key_input.text(),
+            'secret_key': self.secret_key_input.text(),
+            'region': self.region_combo.currentText()
+        }
+        try:
+            with open(CREDENTIALS_PATH, 'w') as f:
+                json.dump(creds, f)
+        except Exception:
+            pass  # Ignore errors
+
+    def load_credentials(self):
+        if os.path.exists(CREDENTIALS_PATH):
+            try:
+                with open(CREDENTIALS_PATH, 'r') as f:
+                    creds = json.load(f)
+                self.access_key_input.setText(creds.get('access_key', ''))
+                self.secret_key_input.setText(creds.get('secret_key', ''))
+                region = creds.get('region', '')
+                idx = self.region_combo.findText(region)
+                if idx >= 0:
+                    self.region_combo.setCurrentIndex(idx)
+            except Exception:
+                pass  # Ignore errors 

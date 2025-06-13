@@ -4,13 +4,15 @@ Main window class for the S3 Browser application.
 
 import sys
 import os
+import io
+import pandas as pd
 from typing import List, Dict, Any
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QSplitter, QTextEdit, QLabel,
     QPushButton, QLineEdit, QComboBox, QProgressBar, QStatusBar,
     QMessageBox, QTabWidget, QScrollArea, QFrame, QDialog,
-    QFileDialog
+    QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QPixmap, QFont
@@ -167,6 +169,13 @@ class S3BrowserMainWindow(QMainWindow):
         self.text_preview = QTextEdit()
         self.text_preview.setReadOnly(True)
         self.preview_tabs.addTab(self.text_preview, "Text")
+        
+        # CSV preview
+        self.csv_preview = QTableWidget()
+        self.csv_preview.setAlternatingRowColors(True)
+        self.csv_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.csv_preview.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.preview_tabs.addTab(self.csv_preview, "CSV")
         
         # Raw preview
         self.raw_preview = QTextEdit()
@@ -415,6 +424,9 @@ class S3BrowserMainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.status_bar.showMessage(f"Loading preview for {obj_data['Key']}...")
         
+        # Store current object key for content type detection
+        self.current_object_key = obj_data['Key']
+        
         # Show object info
         info = f"Key: {obj_data['Key']}\n"
         info += f"Size: {format_size(obj_data['Size'])}\n"
@@ -427,9 +439,30 @@ class S3BrowserMainWindow(QMainWindow):
     def display_object_preview(self, content: bytes, content_type: str):
         """Display object preview"""
         try:
+            # Broaden CSV detection
+            csv_types = [
+                'text/csv',
+                'application/csv',
+                'application/vnd.ms-excel',
+                'text/plain',
+                'application/octet-stream',
+            ]
+            is_csv = False
+            if self.current_object_key and self.current_object_key.lower().endswith('.csv'):
+                is_csv = True
+            elif any(content_type.startswith(t) for t in csv_types):
+                if self.current_object_key and self.current_object_key.lower().endswith('.csv'):
+                    is_csv = True
+                elif content_type in ['text/csv', 'application/csv', 'application/vnd.ms-excel']:
+                    is_csv = True
+            if is_csv:
+                self.display_csv_preview(content)
+                self.preview_tabs.setCurrentIndex(1)  # CSV tab
+                return
+
             # Text preview
             if content_type.startswith('text/') or content_type == 'application/json':
-                text_content = content.decode('utf-8')
+                text_content = content.decode('utf-8', errors='replace')
                 self.text_preview.setText(text_content)
                 self.preview_tabs.setCurrentIndex(0)  # Text tab
             else:
@@ -448,7 +481,7 @@ class S3BrowserMainWindow(QMainWindow):
                     # Scale image to fit
                     scaled_pixmap = pixmap.scaled(600, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     self.image_label.setPixmap(scaled_pixmap)
-                    self.preview_tabs.setCurrentIndex(2)  # Image tab
+                    self.preview_tabs.setCurrentIndex(3)  # Image tab
                 else:
                     self.image_label.setText("Failed to load image")
             else:
@@ -460,6 +493,49 @@ class S3BrowserMainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_bar.clearMessage()
     
+    def display_csv_preview(self, content: bytes):
+        """Display CSV content in table format"""
+        try:
+            # Read CSV content
+            csv_content = content.decode('utf-8', errors='replace')
+            if not csv_content.strip():
+                self.csv_preview.setRowCount(0)
+                self.csv_preview.setColumnCount(0)
+                self.csv_preview.setHorizontalHeaderLabels([])
+                self.csv_preview.setVerticalHeaderLabels([])
+                self.csv_preview.setToolTip('CSV file is empty.')
+                return
+            df = pd.read_csv(io.StringIO(csv_content))
+            if df.empty:
+                self.csv_preview.setRowCount(0)
+                self.csv_preview.setColumnCount(0)
+                self.csv_preview.setHorizontalHeaderLabels([])
+                self.csv_preview.setVerticalHeaderLabels([])
+                self.csv_preview.setToolTip('CSV file is empty.')
+                return
+            # Set up table
+            self.csv_preview.setRowCount(len(df))
+            self.csv_preview.setColumnCount(len(df.columns))
+            self.csv_preview.setHorizontalHeaderLabels(df.columns)
+            # Fill table with data
+            for i in range(len(df)):
+                for j in range(len(df.columns)):
+                    value = str(df.iloc[i, j])
+                    item = QTableWidgetItem(value)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)  # Make read-only
+                    self.csv_preview.setItem(i, j, item)
+            # Resize columns to content
+            self.csv_preview.resizeColumnsToContents()
+            self.csv_preview.setToolTip('')
+        except Exception as e:
+            self.csv_preview.setRowCount(0)
+            self.csv_preview.setColumnCount(0)
+            self.csv_preview.setHorizontalHeaderLabels([])
+            self.csv_preview.setVerticalHeaderLabels([])
+            self.csv_preview.setToolTip(f'Failed to parse CSV: {str(e)}')
+            self.preview_tabs.setCurrentIndex(1)  # Always show CSV tab on error
+            self.show_error(f"Failed to parse CSV: {str(e)}")
+    
     def clear_preview(self):
         """Clear all preview content"""
         self.text_preview.clear()
@@ -467,6 +543,9 @@ class S3BrowserMainWindow(QMainWindow):
         self.image_label.clear()
         self.image_label.setText("No image selected")
         self.object_info.clear()
+        self.csv_preview.setRowCount(0)
+        self.csv_preview.setColumnCount(0)
+        self.current_object_key = None
     
     def delete_selected_object(self):
         """Delete selected object with authentication"""
