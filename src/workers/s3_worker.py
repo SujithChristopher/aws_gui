@@ -127,6 +127,57 @@ class S3Worker(QObject):
         except Exception as e:
             self.error_occurred.emit(f"Failed to delete object: {str(e)}")
 
+    def delete_folder(self, bucket_name: str, prefix: str):
+        """Delete all objects in a folder (prefix)"""
+        if not self.s3_client:
+            self.error_occurred.emit("S3 client not initialized")
+            return
+        
+        try:
+            # List all objects with the prefix
+            objects = []
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+            
+            for page in page_iterator:
+                if 'Contents' in page:
+                    objects.extend([{'Key': obj['Key']} for obj in page['Contents']])
+            
+            if not objects:
+                self.error_occurred.emit(f"No objects found in folder: {prefix}")
+                return
+            
+            # Delete all objects in the folder
+            self.s3_client.delete_objects(
+                Bucket=bucket_name,
+                Delete={'Objects': objects}
+            )
+            
+            self.object_deleted.emit(prefix)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to delete folder: {str(e)}")
+
+    def is_empty_folder(self, bucket_name: str, prefix: str) -> bool:
+        """Check if a folder (prefix) is empty"""
+        if not self.s3_client:
+            return False
+        
+        try:
+            # List objects with the prefix
+            response = self.s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix,
+                MaxKeys=1  # We only need to know if there's at least one object
+            )
+            
+            # If no Contents key or empty Contents, folder is empty
+            return 'Contents' not in response or len(response['Contents']) == 0
+            
+        except Exception as e:
+            logger.error(f"Failed to check if folder is empty: {str(e)}")
+            return False
+
     def download_objects(self, bucket_name: str, objects: List[Dict[str, Any]], download_path: str):
         """Download multiple objects, optionally creating a zip file"""
         if not self.s3_client:

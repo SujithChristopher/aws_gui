@@ -327,6 +327,11 @@ class S3BrowserMainWindow(QMainWindow):
                     font.setBold(True)
                     folder_item.setFont(0, font)
                     
+                    # Check if folder is empty
+                    if self.s3_worker.is_empty_folder(self.current_bucket, current_path):
+                        folder_item.setText(0, part + "/ (empty)")
+                        folder_item.setForeground(0, Qt.gray)
+                    
                     current_parent.addChild(folder_item)
                     folder_items[current_path] = folder_item
                 
@@ -554,22 +559,23 @@ class S3BrowserMainWindow(QMainWindow):
         if not obj_data:
             return
         
-        # Check if it's a folder
-        if isinstance(obj_data, dict) and obj_data.get("type") == "folder":
-            QMessageBox.warning(self, "Cannot Delete Folder", 
-                              "Cannot delete folders. Please delete individual files within the folder.")
-            return
-        
         # Show authentication dialog
-        auth_dialog = AuthenticationDialog(self, obj_data['Key'])
+        auth_dialog = AuthenticationDialog(self, obj_data.get('Key', obj_data.get('path', 'Unknown')))
         if auth_dialog.exec() == QDialog.Accepted:
             password = auth_dialog.get_password()
             
             if password == self.admin_password:
                 # Proceed with deletion
                 self.progress_bar.setVisible(True)
-                self.status_bar.showMessage(f"Deleting {obj_data['Key']}...")
-                self.s3_worker.delete_object(self.current_bucket, obj_data['Key'])
+                
+                if isinstance(obj_data, dict) and obj_data.get("type") == "folder":
+                    # Delete folder
+                    self.status_bar.showMessage(f"Deleting folder {obj_data['path']}...")
+                    self.s3_worker.delete_folder(self.current_bucket, obj_data['path'])
+                else:
+                    # Delete single file
+                    self.status_bar.showMessage(f"Deleting {obj_data['Key']}...")
+                    self.s3_worker.delete_object(self.current_bucket, obj_data['Key'])
             else:
                 QMessageBox.warning(self, "Authentication Failed", "Incorrect password!")
     
